@@ -22,79 +22,66 @@
 #include <string>
 #include <array>
 
-class serial {
-  public:
-  using ibuf_t = std::basic_string_view<uint8_t>;
-  using obuf_t = std::basic_string<uint8_t>;
+namespace serial {
 
-  template <typename ... arg_t>
-  constexpr static obuf_t pack(const arg_t & ... args);
-  template <typename ... arg_t>
-  constexpr static std::tuple<arg_t ...> unpack(ibuf_t &&ibuf);
+using ibuf_t = std::basic_string_view<uint8_t>;
+using obuf_t = std::basic_string<uint8_t>;
 
-  private:
-  template<typename first_t, typename ... rest_t>
-  struct is_tuple {
-    static const bool value =
-    std::is_same<first_t, std::tuple<>>::value;
-  };
-
-  template<typename first_t, typename ... rest_t>
-  struct is_tuple<std::tuple<first_t, rest_t ...>> {
-    static const bool value = true;
-  };
-
-  template<typename first_t, typename ... rest_t>
-  struct is_pair {
-    static const bool value = false;
-  };
-
-  template<typename first_t, typename ... rest_t>
-  struct is_pair<std::pair<first_t, rest_t ...>> {
-    static const bool value = true;
-  };
-
-  template<typename first_t, typename ... rest_t>
-  struct is_array {
-    static const bool value = false;
-  };
-
-  template<typename first_t, size_t size>
-  struct is_array<std::array<first_t, size>> {
-    static const bool value = true;
-  };
-
-  template <typename arg_t>
-  struct is_base {
-    static const bool value =
-    std::is_integral<arg_t>::value ||
-    std::is_floating_point<arg_t>::value;
-  };
-
-  template <typename arg_t>
-  struct is_string {
-    static const bool value =
-    std::is_same<arg_t,      std::string>::value ||
-    std::is_same<arg_t, std::string_view>::value;
-  };
-
-  template <typename arg_t>
-  static constexpr obuf_t pack_one(const arg_t &arg);
-  template <typename ... arg_t, size_t ... seq>
-  static constexpr obuf_t pack_tuple(const std::tuple<arg_t ...> &arg, std::index_sequence<seq ...>);
-  template <typename arg_t>
-  static constexpr arg_t unpack_one(ibuf_t &ibuf);
-  template <typename arg_t, size_t ... seq>
-  static constexpr arg_t unpack_tuple(ibuf_t &ibuf, std::index_sequence<seq ...>);
+// ref https://stackoverflow.com/questions/15887144/stdremove-const-with-const-references 
+template<typename arg_t>
+struct remove_operator {
+  using type = typename std::remove_const<typename std::remove_reference<arg_t>::type>::type;
 };
 
+template<template <typename ... arg_t> typename container_t, typename first_t, typename ... rest_t>
+struct is_container {
+  static const bool value = false;
+};
+
+template<template <typename ... arg_t> typename container_t, typename first_t, typename ... rest_t>
+struct is_container<container_t, container_t<first_t, rest_t ...>> {
+  static const bool value = true;
+};
+
+template<typename first_t, typename ... rest_t>
+using is_tuple = is_container<std::tuple, first_t, rest_t ...>;
+
+template<typename first_t, typename ... rest_t>
+using is_pair = is_container<std::pair, first_t, rest_t ...>;
+
+template<typename first_t, typename ... rest_t>
+using is_string = is_container<std::basic_string, first_t, rest_t ...>;
+
+template<typename first_t, typename ... rest_t>
+using is_string_view = is_container<std::basic_string_view, first_t, rest_t ...>;
+
 template <typename arg_t>
-constexpr serial::obuf_t serial::pack_one(const arg_t &arg) {
-  if constexpr (std::is_same<arg_t, const char *>::value) {
-    return obuf_t((const uint8_t *)arg, strlen(arg) + 1);
+constexpr obuf_t pack_one(const arg_t &arg);
+template <typename arg_t>
+constexpr arg_t unpack_one(ibuf_t &ibuf);
+
+template <typename ... arg_t>
+constexpr void pod_check(const arg_t & ... arg) {
+  if constexpr (sizeof...(arg_t)) {
+    constexpr auto check = [](auto arg) {
+      static_assert(std::is_pod<decltype(arg)>::value);
+    };
+    (check(arg), ...);
   }
-  else if constexpr (is_string<arg_t>::value) {
-    return obuf_t((const uint8_t *)arg.data(), arg.size()) + obuf_t((const uint8_t *)"\0", 1);
+}
+
+template <typename ... arg_t, size_t ... seq>
+constexpr obuf_t pack_tuple(const std::tuple<arg_t ...> &arg, std::index_sequence<seq ...>) {
+  if constexpr (sizeof...(arg_t))
+    return (pack_one(std::get<seq>(arg)) + ...);
+  else
+    return {};
+}
+
+template <typename arg_t>
+constexpr obuf_t pack_one(const arg_t &arg) {
+  if constexpr (is_string<arg_t>::value || is_string_view<arg_t>::value) {
+    return pack_one(arg.size()) + obuf_t((const uint8_t *)arg.data(), arg.size());
   }
   else if constexpr (is_tuple<arg_t>::value) {
     return pack_tuple(arg, std::make_index_sequence<std::tuple_size<arg_t>::value> {});
@@ -102,75 +89,65 @@ constexpr serial::obuf_t serial::pack_one(const arg_t &arg) {
   else if constexpr (is_pair<arg_t>::value) {
     return pack_one(arg.first) + pack_one(arg.second);
   }
-  else if constexpr (is_array<arg_t>::value) {
-    return obuf_t((uint8_t *)arg.data(), arg.size() * sizeof(typename arg_t::value_type));
-  }
-  else if constexpr (is_base<arg_t>::value) {
-    return obuf_t((const uint8_t *)&arg, sizeof(arg_t));
+  else if constexpr (std::is_pod<typename remove_operator<arg_t>::type>::value) {
+    return obuf_t((uint8_t *)&arg, sizeof(arg_t));
   }
   else {
     static_assert(!std::is_same<arg_t, arg_t>::value, "unknown arg type");
   }
 }
 
-template <typename ... arg_t, size_t ... seq>
-constexpr serial::obuf_t serial::pack_tuple(const std::tuple<arg_t ...> &arg, std::index_sequence<seq ...>) {
-  if constexpr (sizeof...(arg_t))
-    return (pack_one(std::get<seq>(arg)) + ...);
-  else
-    return {};
-}
-
 template <typename ... arg_t>
-constexpr serial::obuf_t serial::pack(const arg_t & ... args) {
+constexpr obuf_t pack(const arg_t & ... args) {
   if constexpr (sizeof...(arg_t))
     return (pack_one(args) + ...);
   else
     return {};
 }
 
-template <typename arg_t>
-constexpr arg_t serial::unpack_one(ibuf_t &ibuf) {
-  using arg_rcr = typename std::remove_const<typename std::remove_reference<arg_t>::type>::type;
-  assert(ibuf.data() && ibuf.size());
-  if constexpr (std::is_same<arg_rcr, char *>::value) {
-    auto arg = (arg_rcr)ibuf.data();
-    ibuf.remove_prefix(strlen((const char *)ibuf.data()) + 1);
-    return arg;
-  }
-  else if constexpr (is_tuple<arg_rcr>::value) {
-    return unpack_tuple<arg_rcr>(ibuf, std::make_index_sequence<std::tuple_size<arg_rcr>::value> {});
-  }
-  else if constexpr (is_pair<arg_rcr>::value) {
-    return {unpack_one<decltype(arg_rcr::first)>(ibuf), unpack_one<decltype(arg_rcr::second)>(ibuf)};
-  }
-  else if constexpr (is_array<arg_rcr>::value) {
-    auto p = (arg_rcr *)ibuf.data();
-    ibuf.remove_prefix(sizeof(arg_rcr));
-    return *p;
-  }
-  else if constexpr (is_base<arg_rcr>::value) {
-    auto p = (arg_rcr *)ibuf.data();
-    ibuf.remove_prefix(sizeof(arg_rcr));
-    return *p;
-  }
-  else {
-    static_assert(!std::is_same<arg_t, arg_t>::value, "unknown arg type");
-  }
-}
-
 template <typename arg_t, size_t ... seq>
-constexpr arg_t serial::unpack_tuple(ibuf_t &ibuf, std::index_sequence<seq ...>) {
+constexpr arg_t unpack_tuple(ibuf_t &ibuf, std::index_sequence<seq ...>) {
   if constexpr (std::tuple_size<arg_t>::value)
     return {unpack_one<typename std::tuple_element<seq, arg_t>::type>(ibuf) ...};
   else
     return {};
 }
 
+template <typename arg_t>
+constexpr arg_t unpack_one(ibuf_t &ibuf) {
+  if constexpr (is_string_view<typename remove_operator<arg_t>::type>::value) {
+    static_assert(!std::is_reference<arg_t>::value, "cannot return value referencing local variable");
+    auto size = unpack_one<size_t>(ibuf);
+    auto data = (typename arg_t::value_type *)ibuf.data();
+    ibuf.remove_prefix(size);
+    return {data, size};
+  }
+  else if constexpr (std::is_pod<typename remove_operator<arg_t>::type>::value) {
+    typename remove_operator<arg_t>::type *p = (typename remove_operator<arg_t>::type *)ibuf.data();
+    ibuf.remove_prefix(sizeof(arg_t));
+    return *p;
+  }
+  else if constexpr (is_tuple<arg_t>::value) {
+    return unpack_tuple<arg_t>(ibuf, std::make_index_sequence<std::tuple_size<typename remove_operator<arg_t>::type>::value> {});
+  }
+  else if constexpr (is_pair<arg_t>::value) {
+    return {unpack_one<arg_t::first>(ibuf), unpack_one<arg_t::second>(ibuf)};
+  }
+  else if constexpr (std::is_pointer<typename remove_operator<arg_t>::type>::value) {
+    static_assert(!std::is_function<typename remove_operator<arg_t>::type>::value);
+    return (arg_t)ibuf.data();
+  }
+  else {
+    static_assert(!std::is_same<arg_t, arg_t>::value, "unknown arg type");
+  }
+}
+
 template <typename ... arg_t>
-constexpr std::tuple<arg_t ...> serial::unpack(ibuf_t &&ibuf) {
+constexpr std::tuple<arg_t ...> unpack(ibuf_t &&ibuf) {
   if constexpr (sizeof...(arg_t))
     return {unpack_one<arg_t>(ibuf) ...};
   else
     return {};
 }
+
+} /* namespace serial */
