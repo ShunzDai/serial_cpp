@@ -80,6 +80,7 @@ constexpr obuf_t pack_tuple(const std::tuple<arg_t ...> &arg, std::index_sequenc
 
 template <typename arg_t>
 constexpr obuf_t pack_one(const arg_t &arg) {
+  using base_t = typename remove_operator<arg_t>::type;
   if constexpr (is_string<arg_t>::value || is_string_view<arg_t>::value) {
     return pack_one(arg.size()) + obuf_t((const uint8_t *)arg.data(), arg.size());
   }
@@ -89,7 +90,7 @@ constexpr obuf_t pack_one(const arg_t &arg) {
   else if constexpr (is_pair<arg_t>::value) {
     return pack_one(arg.first) + pack_one(arg.second);
   }
-  else if constexpr (std::is_pod<typename remove_operator<arg_t>::type>::value) {
+  else if constexpr (std::is_pod<base_t>::value) {
     return obuf_t((uint8_t *)&arg, sizeof(arg_t));
   }
   else {
@@ -115,27 +116,29 @@ constexpr arg_t unpack_tuple(ibuf_t &ibuf, std::index_sequence<seq ...>) {
 
 template <typename arg_t>
 constexpr arg_t unpack_one(ibuf_t &ibuf) {
-  if constexpr (is_string_view<typename remove_operator<arg_t>::type>::value) {
-    static_assert(!std::is_reference<arg_t>::value, "cannot return value referencing local variable");
+  using base_t = typename remove_operator<arg_t>::type;
+  if constexpr (is_string_view<base_t>::value) {
+    static_assert(!std::is_reference<arg_t>::value, "returning reference to local temporary object");
     auto size = unpack_one<size_t>(ibuf);
     auto data = (typename arg_t::value_type *)ibuf.data();
     ibuf.remove_prefix(size);
     return {data, size};
   }
-  else if constexpr (std::is_pod<typename remove_operator<arg_t>::type>::value) {
-    typename remove_operator<arg_t>::type *p = (typename remove_operator<arg_t>::type *)ibuf.data();
+  else if constexpr (std::is_pointer<base_t>::value) {
+    return (arg_t)ibuf.data();
+  }
+  else if constexpr (std::is_pod<base_t>::value) {
+    base_t *p = (base_t *)ibuf.data();
     ibuf.remove_prefix(sizeof(arg_t));
     return *p;
   }
-  else if constexpr (is_tuple<arg_t>::value) {
-    return unpack_tuple<arg_t>(ibuf, std::make_index_sequence<std::tuple_size<typename remove_operator<arg_t>::type>::value> {});
+  else if constexpr (is_tuple<base_t>::value) {
+    static_assert(!std::is_reference<arg_t>::value, "returning reference to local temporary object");
+    return unpack_tuple<base_t>(ibuf, std::make_index_sequence<std::tuple_size<base_t>::value> {});
   }
-  else if constexpr (is_pair<arg_t>::value) {
-    return {unpack_one<arg_t::first>(ibuf), unpack_one<arg_t::second>(ibuf)};
-  }
-  else if constexpr (std::is_pointer<typename remove_operator<arg_t>::type>::value) {
-    static_assert(!std::is_function<typename remove_operator<arg_t>::type>::value);
-    return (arg_t)ibuf.data();
+  else if constexpr (is_pair<base_t>::value) {
+    static_assert(!std::is_reference<arg_t>::value, "returning reference to local temporary object");
+    return {unpack_one<typename base_t::first_type>(ibuf), unpack_one<typename base_t::second_type>(ibuf)};
   }
   else {
     static_assert(!std::is_same<arg_t, arg_t>::value, "unknown arg type");
@@ -143,9 +146,17 @@ constexpr arg_t unpack_one(ibuf_t &ibuf) {
 }
 
 template <typename ... arg_t>
-constexpr std::tuple<arg_t ...> unpack(ibuf_t &&ibuf) {
+constexpr std::tuple<arg_t ...> unpack(ibuf_t &&buf) {
   if constexpr (sizeof...(arg_t))
-    return {unpack_one<arg_t>(ibuf) ...};
+    return {unpack_one<arg_t>(buf) ...};
+  else
+    return {};
+}
+
+template <typename ... arg_t>
+constexpr std::tuple<arg_t ...> unpack(obuf_t &&buf) {
+  if constexpr (sizeof...(arg_t))
+    return {unpack_one<arg_t>(buf) ...};
   else
     return {};
 }
